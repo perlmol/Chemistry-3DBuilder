@@ -3,7 +3,7 @@ use warnings;
 no warnings qw(qw);
 
 use Test::More;
-use Chemistry::3DBuilder;
+use Chemistry::3DBuilder qw(build_3d);
 use Chemistry::File::SMILES;
 use Chemistry::File::SMARTS;
 use Chemistry::Pattern;
@@ -93,7 +93,7 @@ my @dih_types = (
 
 MOL: for my $s (@mols) {
     my $mol = Chemistry::Mol->parse($s, format => 'smiles');
-    Chemistry::3DBuilder::build3d($mol);
+    build_3d($mol);
 
     my $n_bond = 0;
     for my $bt (@bond_types) {

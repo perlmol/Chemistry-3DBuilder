@@ -9,23 +9,28 @@ use Chemistry::Ring;
 use Chemistry::InternalCoords;
 use List::Util qw(first);
 
+use base qw(Exporter);
+
+our @EXPORT_OK = qw(build_3d);
+our %EXPORT_TAGS = ( all => \@EXPORT_OK );
+
 our $DEBUG = 0;
 
 =head1 NAME
 
-Chemistry::3DBuilder - Generate 3D coordinates from conection table
+Chemistry::3DBuilder - Generate 3D coordinates from a connection table
 
 =head1 SYNOPSIS
 
     # example: convert SMILES to MDL molfile
-    use Chemistry::3DBuilder;
+    use Chemistry::3DBuilder qw(build_3d);
     use Chemistry::File::SMILES;
     use Chemistry::File::MDLMol;
 
-    my $smiles = 'OC(=O)C(N)C(C)CC';
-    my $mol = Chemistry::Mol->parse($smiles, format => 'smiles');
+    my $s = '[O-]C(=O)C(N)C(C)CC';
+    my $mol = Chemistry::Mol->parse($s, format => 'smiles');
 
-    Chemistry::3DBuilder::build3d($mol);
+    build_3d($mol);
 
     print $mol->print(format => 'mdl');
 
@@ -43,9 +48,11 @@ supported.
 
 =head1 SUBROUTINES
 
+These subroutines may be exported; to export all, use the ':all' tag.
+
 =over
 
-=item build3d($mol)
+=item build_3d($mol)
 
 Add internal and cartesian coordinates to the molecule C<$mol>.
 
@@ -56,7 +63,7 @@ Add internal and cartesian coordinates to the molecule C<$mol>.
 # stereochemistry
 # (E)-esters and acids
 
-sub build3d {
+sub build_3d {
     my ($mol) = @_;
 
     # prepare molecule
