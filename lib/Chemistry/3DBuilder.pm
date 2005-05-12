@@ -7,7 +7,9 @@ use strict;
 use warnings;
 use Chemistry::Ring;
 use Chemistry::InternalCoords;
+use Chemistry::File::SMARTS;
 use List::Util qw(first);
+use Scalar::Util qw(weaken);
 
 use base qw(Exporter);
 
@@ -73,12 +75,12 @@ sub build_3d {
 
     # check for rings
     my $rings = $mol->attr('ring/rings');
+    my $user = { n => 0 };
+
     if (@$rings) {
         warn "mol has " . @$rings . " rings\n";
-        return;
+        find_ring_templates($mol, $user) or return;
     }
-
-    my $user = { n => 0 };
     build_chain($mol, $user);
 
     #print "sprout_hydrogens\n" if $DEBUG;
@@ -92,9 +94,7 @@ sub build_3d {
         add_atom(atom => $h, bond => $bond, from => $nei, user => $user);
     }
     #warn "IC($_): " . $_->internal_coords for $mol->atoms;
-
-    # calculate the cartesian coordinates
-    $_->internal_coords->add_cartesians for $mol->atoms;
+    1;
 }
 
 sub build_chain {
@@ -114,6 +114,10 @@ sub bond_length {
 
 sub choose_bond {
     my ($atom, $bond, $from) = @_;
+    my $r = $atom->attr('3dbuilder/ring_system');
+    if ($r and $r->{prev_atom} eq $from) { # endocyclic
+            return ($from, $r->{ic}[0]);
+    }
     ($from, bond_length($bond));
 }
 
@@ -153,6 +157,13 @@ sub bond_dihedral {
 sub choose_angle {
     my ($atom, $bond, $from) = @_;
     my ($len_ref, $len_val) = choose_bond($atom, $bond, $from);
+    my $r = $atom->attr('3dbuilder/ring_system');
+    if ($r) {
+        my $r_ang = $r->{prev_atom}->attr('3dbuilder/ring_system')->{prev_atom};
+        if ($r_ang->internal_coords) { # endocyclic
+            return ($len_ref, $len_val, $r_ang, $r->{ic}[1]);
+        }
+    }
     my ($ang_ref) = first { $_->internal_coords } $from->neighbors($atom);
     ($len_ref, $len_val, $ang_ref, bond_angle($atom, $from, $ang_ref));
 }
@@ -161,6 +172,69 @@ sub choose_dihedral {
     my ($atom, $bond, $from) = @_;
     my ($len_ref, $len_val, $ang_ref, $ang_val) =
         choose_angle($atom, $bond, $from);
+
+    my $r = $atom->attr('3dbuilder/ring_system');
+    if ($r) {
+        my $r_dih = $r->{prev_atom}->attr('3dbuilder/ring_system')->{prev_atom}
+            ->attr('3dbuilder/ring_system')->{prev_atom};
+        if ($r_dih->internal_coords) { # endocyclic
+            return ($len_ref, $len_val, $ang_ref, $ang_val, 
+                $r_dih, $r->{ic}[2]);
+        }
+    }
+
+    my ($dih_ref, $dih_val);
+    my $hyb = atom_hybridization($len_ref);
+    my $fd;
+   
+    #warn "hyb($len_ref)=$hyb\n";
+    my ($imp) = grep { $_->internal_coords and $_ ne $ang_ref } 
+        $len_ref->neighbors;
+    if ($imp) { # improper dihedral
+        $dih_ref = $imp;
+        if ($hyb eq 'sp2') {
+            $dih_val = 180;
+        } else {
+            $dih_val = 120;
+            # check if 120 is already taken
+            for my $neinei ($len_ref->neighbors($atom)) {
+                next unless $neinei->internal_coords;
+                my $ic = Chemistry::InternalCoords->new($atom, $len_ref, 
+                    $len_val, $ang_ref, $ang_val, $dih_ref, $dih_val);
+                my $ang = $neinei->angle_deg($len_ref, $ic->cartesians);
+                $dih_val = 240, last if $ang < 60;
+            }
+        }
+    } else {
+        # for fd(first_dihedralang): ang_ref = ok; dih_ref = dih_ref(fd)
+        $dih_ref = first { $_->internal_coords } $ang_ref->neighbors($len_ref);
+        if ($dih_ref) {
+            $dih_val = 180;
+        } else {
+            $dih_ref = first { $_->internal_coords and $_ ne $ang_ref } 
+                $len_ref->neighbors($atom);
+            $dih_val = $hyb eq 'sp2' ? 180 : 120;
+        }
+    }
+    
+    ($len_ref, $len_val, $ang_ref, $ang_val, $dih_ref, $dih_val);
+}
+
+sub choose_dihedral1 {
+    my ($atom, $bond, $from) = @_;
+    my ($len_ref, $len_val, $ang_ref, $ang_val) =
+        choose_angle($atom, $bond, $from);
+
+    my $r = $atom->attr('3dbuilder/ring_system');
+    if ($r) {
+        my $r_dih = $r->{prev_atom}->attr('3dbuilder/ring_system')->{prev_atom}
+            ->attr('3dbuilder/ring_system')->{prev_atom};
+        if ($r_dih->internal_coords) { # endocyclic
+            return ($len_ref, $len_val, $ang_ref, $ang_val, 
+                $r_dih, $r->{ic}[2]);
+        }
+    }
+
     my ($dih_ref, $dih_val);
     my $hyb = atom_hybridization($len_ref);
     my $fd;
@@ -202,29 +276,97 @@ sub choose_dihedral {
 sub add_atom {
     my (%opts) = @_;
     my ($atom, $bond, $from, $user) = @opts{qw(atom bond from user)};
-    my $stack = $user->{stack};
-    my $n = ++$user->{n};
 
-    #print "adding atom $n: $atom!\n" if $DEBUG;
-    my $ic;
-    if ($n == 1) {                             
-        # first atom; place at origin
-        $ic = Chemistry::InternalCoords->new($atom);
-    } elsif ($n == 2) {
-        # second atom only needs a bond
-        $ic = Chemistry::InternalCoords->new(
-            $atom, choose_bond($atom, $bond, $from));
-    } elsif ($n == 3) {
-        # third atom, needs an angle
-        $ic = Chemistry::InternalCoords->new(
-            $atom, choose_angle($atom, $bond, $from));
-    } else {
-        # other atoms need dihedral
-        $ic = Chemistry::InternalCoords->new(
-            $atom, choose_dihedral($atom, $bond, $from));
+    return if $atom->internal_coords;
+    my $ring = $atom->attr('3dbuilder/ring_system');
+    my $first_atom = $atom;
+
+    while (1) {
+        my $ic;
+        my $n = ++$user->{n};
+        print "Adding atom $n ($atom)\n" if $DEBUG;
+        if ($n == 1) {          # first atom; place at origin
+            $ic = Chemistry::InternalCoords->new($atom);
+        } elsif ($n == 2) {     # second atom only needs a bond
+            $ic = Chemistry::InternalCoords->new(
+                $atom, choose_bond($atom, $bond, $from));
+        } elsif ($n == 3) {     # third atom, needs an angle
+            $ic = Chemistry::InternalCoords->new(
+                $atom, choose_angle($atom, $bond, $from));
+        } else {                # other atoms need dihedral
+            $ic = Chemistry::InternalCoords->new(
+                $atom, choose_dihedral($atom, $bond, $from));
+        }
+        $atom->internal_coords($ic);
+        $atom->internal_coords->add_cartesians;
+
+        last if !$ring || $ring->{next_atom} eq $first_atom;
+
+        # ugly way of finding out bond between two atoms
+        ($bond) = grep { 
+            grep { 
+                $_ eq $ring->{next_atom} 
+            } $_->atoms 
+        } $atom->bonds;
+
+        $from = $atom;
+        $atom = $ring->{next_atom};
+        $ring = $atom->attr('3dbuilder/ring_system');
     }
-    $atom->internal_coords($ic);
 }
+
+
+no warnings qw(qw);
+my @RINGS = (
+    [ C12CCCCC1CCCC2 => qw(1.5,109.47,60;1.5,109.47,180;1.5,109.47,180;1.5,109.47,-60;1.5,109.47,60;1.5,109.47,-60;1.5,109.47,180;1.5,109.47,180;1.5,109.47,60;1.5,109.47,-60) ],
+    [ c1ccccc1 => qw(1.4,120,0;1.4,120,0;1.4,120,0;1.4,120,0;1.4,120,0;1.4,120,0) ],
+    [ C1CCCCC1 => qw(1.5,109.47,60;1.5,109.47,-60;1.5,109.47,60;1.5,109.47,-60;1.5,109.47,60;1.5,109.47,-60) ],
+    [ C1CC1 => qw(1.5,60,0;1.5,60,0;1.5,60,0) ],
+);
+
+sub find_ring_templates {
+    my ($mol, $user) = @_;
+    my $rings = $mol->attr('ring/rings');
+    for my $r (@RINGS) {
+        my $s = $r->[0];
+        #use Data::Dumper; print Dumper $mol;
+        #$Chemistry::File::SMARTS::DEBUG=1;
+        my $patt = Chemistry::Pattern->parse($s, 
+            format => 'smarts', pattern_options => { overlap => 0 });
+        while ($patt->match($mol)) {
+            my @a = $patt->atom_map;  # XXX leak
+            next if first { $_->{attr}{'3dbuilder/ring_system'} } @a;
+            print "matched $s (@a)\n" if $DEBUG;
+            my $i = 0;
+            #1.4,120,0;1.4,120,0;1.4,120,0;1.4,120,0;1.4,120,0;1.4,120,0
+            my @ics = map { [ split ',', $_ ] } split ';', $r->[1];
+            for my $atom (@a) {
+                my $ring_system = {
+                    #template  => $r,
+                    #n         => $i,
+                    next_atom => $a[($i + 1) % @a],
+                    prev_atom => $a[($i - 1) % @a],
+                    ic        => $ics[$i],
+                };
+                $i++;
+                $atom->attr('3dbuilder/ring_system', $ring_system);
+            }
+        }
+    }
+
+    # make sure mol has no rings without a known template
+    for my $ring (@$rings) {
+        for my $atom ($ring->atoms) {
+            unless ($atom->attr('3dbuilder/ring_system')) {
+                warn "unrecognized ring (" . join(" ",$ring->atoms), ")\n";
+                return;
+            }
+        }
+    }
+    1;
+}
+
+
 
 # do a depth-first traversal of a molecule. This should be added to 
 # Chemistry::Mol

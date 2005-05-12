@@ -15,6 +15,6 @@ my $smiles = shift || die "pls give a SMILES string\n";
 my $mol = Chemistry::Mol->parse($smiles, format => 'smiles');
 
 $Chemistry::3DBuilder::DEBUG = $DEBUG;
-build_3d($mol);
-
-print $mol->print(format => $format || 'mdl');
+if (build_3d($mol)) {
+    print $mol->print(format => $format || 'mdl');
+}
